@@ -1,0 +1,994 @@
+// ==UserScript==
+// @name         Plemiona - skaner rozbudowy barbarzyńców z AF
+// @namespace    https://github.com/Burzuazja/plemiona-skrypty
+// @version      2.1.1
+// @description  Zadokowany skaner raportów działający w Raportach i Asystencie Farmienia.
+// @author       Burzuazja
+// @match        https://*.plemiona.pl/game.php*
+// @match        https://*.tribalwars.net/game.php*
+// @match        https://*.tribalwars.works/game.php*
+// @updateURL    https://raw.githubusercontent.com/Burzuazja/plemiona-skrypty/main/skaner-raportow.user.js
+// @downloadURL  https://raw.githubusercontent.com/Burzuazja/plemiona-skrypty/main/skaner-raportow.user.js
+// @supportURL   https://github.com/Burzuazja/plemiona-skrypty/issues
+// @homepageURL  https://github.com/Burzuazja/plemiona-skrypty
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const SCRIPT_ID = 'twBarbarianBuildingScanner';
+    const PANEL_ID = `${SCRIPT_ID}Panel`;
+    const STYLE_ID = `${SCRIPT_ID}Style`;
+
+    const STORAGE_SETTINGS = `${SCRIPT_ID}SettingsV3`;
+    const STORAGE_RESULTS = `${SCRIPT_ID}ResultsV3`;
+
+    const DEFAULT_SETTINGS = {
+        radius: 30,
+        maxReports: 500,
+        concurrency: 4,
+        delay: 150,
+        scanAF: true,
+        scanReports: true,
+        onlyNewest: true
+    };
+
+    const BUILDINGS = {
+        main: {
+            label: 'Ratusz',
+            aliases: [
+                'ratusz',
+                'headquarters',
+                'main building',
+                'hauptgebäude'
+            ]
+        },
+
+        barracks: {
+            label: 'Koszary',
+            aliases: [
+                'koszary',
+                'barracks',
+                'kaserne'
+            ]
+        },
+
+        stable: {
+            label: 'Stajnia',
+            aliases: [
+                'stajnia',
+                'stable',
+                'stall'
+            ]
+        },
+
+        garage: {
+            label: 'Warsztat',
+            aliases: [
+                'warsztat',
+                'workshop',
+                'werkstatt'
+            ]
+        },
+
+        smith: {
+            label: 'Kuźnia',
+            aliases: [
+                'kuźnia',
+                'kuznia',
+                'smithy',
+                'schmiede'
+            ]
+        },
+
+        snob: {
+            label: 'Pałac',
+            aliases: [
+                'pałac',
+                'palac',
+                'academy',
+                'adelshof'
+            ]
+        },
+
+        market: {
+            label: 'Rynek',
+            aliases: [
+                'rynek',
+                'market',
+                'marktplatz'
+            ]
+        },
+
+        wood: {
+            label: 'Tartak',
+            aliases: [
+                'tartak',
+                'timber camp',
+                'holzfäller'
+            ]
+        },
+
+        stone: {
+            label: 'Cegielnia',
+            aliases: [
+                'cegielnia',
+                'clay pit',
+                'lehmgrube'
+            ]
+        },
+
+        iron: {
+            label: 'Huta',
+            aliases: [
+                'huta żelaza',
+                'huta zelaza',
+                'iron mine',
+                'eisenmine'
+            ]
+        },
+
+        farm: {
+            label: 'Zagroda',
+            aliases: [
+                'zagroda',
+                'farm',
+                'bauernhof'
+            ]
+        },
+
+        storage: {
+            label: 'Spichlerz',
+            aliases: [
+                'spichlerz',
+                'warehouse',
+                'speicher'
+            ]
+        },
+
+        hide: {
+            label: 'Schowek',
+            aliases: [
+                'schowek',
+                'hiding place',
+                'versteck'
+            ]
+        },
+
+        wall: {
+            label: 'Mur',
+            aliases: [
+                'mur',
+                'wall',
+                'mauer'
+            ]
+        },
+
+        watchtower: {
+            label: 'Wieża',
+            aliases: [
+                'wieża strażnicza',
+                'wieza straznicza',
+                'watchtower',
+                'wachturm'
+            ]
+        },
+
+        church: {
+            label: 'Kościół',
+            aliases: [
+                'kościół',
+                'kosciol',
+                'church',
+                'kirche'
+            ]
+        }
+    };
+
+    const BUILDING_ORDER = [
+        'main',
+        'barracks',
+        'stable',
+        'garage',
+        'smith',
+        'snob',
+        'market',
+        'wood',
+        'stone',
+        'iron',
+        'farm',
+        'storage',
+        'hide',
+        'wall',
+        'watchtower',
+        'church'
+    ];
+
+    let settings = loadSettings();
+    let currentResults = [];
+
+    let scanning = false;
+    let stopRequested = false;
+
+    let lastKnownUrl = location.href;
+
+    startWatcher();
+
+    function startWatcher() {
+        injectStyles();
+        tryMountPanel();
+
+        setInterval(() => {
+            const urlChanged = lastKnownUrl !== location.href;
+
+            if (urlChanged) {
+                lastKnownUrl = location.href;
+            }
+
+            if (isSupportedScreen()) {
+                tryMountPanel();
+            } else {
+                removePanel();
+            }
+        }, 1000);
+
+        const observer = new MutationObserver(() => {
+            if (isSupportedScreen()) {
+                tryMountPanel();
+            }
+        });
+
+        observer.observe(document.documentElement, {
+            childList: true,
+            subtree: true
+        });
+    }
+
+    function getCurrentScreen() {
+        const urlScreen = new URLSearchParams(
+            location.search
+        ).get('screen');
+
+        if (urlScreen) {
+            return urlScreen;
+        }
+
+        if (
+            typeof game_data !== 'undefined' &&
+            game_data &&
+            game_data.screen
+        ) {
+            return String(game_data.screen);
+        }
+
+        return '';
+    }
+
+    function isSupportedScreen() {
+        const screen = getCurrentScreen();
+
+        return screen === 'report' || screen === 'am_farm';
+    }
+
+    function removePanel() {
+        const panel = document.getElementById(PANEL_ID);
+
+        if (panel) {
+            panel.remove();
+        }
+    }
+
+    function tryMountPanel() {
+        if (!isSupportedScreen()) {
+            return;
+        }
+
+        const existing = document.getElementById(PANEL_ID);
+
+        if (
+            existing &&
+            document.body.contains(existing)
+        ) {
+            return;
+        }
+
+        const target = findDockTarget();
+
+        if (!target) {
+            console.warn(
+                '[Skaner barbarzyńców] Nie znaleziono miejsca do zadokowania panelu.'
+            );
+
+            return;
+        }
+
+        createPanel(target);
+    }
+
+    function findDockTarget() {
+        const selectors = [
+            '#content_value',
+            '#contentContainer',
+            '#content',
+            '.maincell',
+            '#mobileContent',
+            '#mobileContentContainer'
+        ];
+
+        for (const selector of selectors) {
+            const element = document.querySelector(selector);
+
+            if (element) {
+                return element;
+            }
+        }
+
+        const mainTable = document.querySelector(
+            'table.main, table.vis, #content_value > table'
+        );
+
+        if (mainTable?.parentElement) {
+            return mainTable.parentElement;
+        }
+
+        return document.body || null;
+    }
+
+    function createPanel(target) {
+        const oldPanel = document.getElementById(PANEL_ID);
+
+        if (oldPanel) {
+            oldPanel.remove();
+        }
+
+        settings = loadSettings();
+
+        const screen = getCurrentScreen();
+
+        const panel = document.createElement('div');
+
+        panel.id = PANEL_ID;
+
+        panel.innerHTML = `
+            <div class="twbbs-header" id="twbbsHeader">
+                <div>
+                    <strong>Skaner rozbudowy barbarzyńców</strong>
+
+                    <span class="twbbs-location">
+                        ${
+                            screen === 'am_farm'
+                                ? 'Asystent Farmienia'
+                                : 'Raporty'
+                        }
+                    </span>
+                </div>
+
+                <button type="button" id="twbbsToggle">
+                    Zwiń
+                </button>
+            </div>
+
+            <div id="twbbsBody" class="twbbs-body">
+                <div class="twbbs-settings">
+                    <label>
+                        <span>Promień</span>
+
+                        <input
+                            id="twbbsRadius"
+                            type="number"
+                            min="1"
+                            max="500"
+                            value="${settings.radius}"
+                        >
+                    </label>
+
+                    <label>
+                        <span>Maks. raportów</span>
+
+                        <input
+                            id="twbbsMaxReports"
+                            type="number"
+                            min="1"
+                            max="10000"
+                            value="${settings.maxReports}"
+                        >
+                    </label>
+
+                    <label>
+                        <span>Równoległe pobieranie</span>
+
+                        <input
+                            id="twbbsConcurrency"
+                            type="number"
+                            min="1"
+                            max="10"
+                            value="${settings.concurrency}"
+                        >
+                    </label>
+
+                    <label class="twbbs-checkbox">
+                        <input
+                            id="twbbsScanAF"
+                            type="checkbox"
+                            ${settings.scanAF ? 'checked' : ''}
+                        >
+
+                        <span>Pobieraj z AF</span>
+                    </label>
+
+                    <label class="twbbs-checkbox">
+                        <input
+                            id="twbbsScanReports"
+                            type="checkbox"
+                            ${settings.scanReports ? 'checked' : ''}
+                        >
+
+                        <span>Pobieraj ze wszystkich stron raportów</span>
+                    </label>
+
+                    <label class="twbbs-checkbox">
+                        <input
+                            id="twbbsOnlyNewest"
+                            type="checkbox"
+                            ${settings.onlyNewest ? 'checked' : ''}
+                        >
+
+                        <span>Tylko najnowszy raport wioski</span>
+                    </label>
+                </div>
+
+                <div class="twbbs-actions">
+                    <button
+                        type="button"
+                        id="twbbsStart"
+                        class="twbbs-primary"
+                    >
+                        Pobierz wszystko
+                    </button>
+
+                    <button
+                        type="button"
+                        id="twbbsStop"
+                        disabled
+                    >
+                        Zatrzymaj
+                    </button>
+
+                    <button
+                        type="button"
+                        id="twbbsSaved"
+                    >
+                        Pokaż zapisane
+                    </button>
+
+                    <button
+                        type="button"
+                        id="twbbsExport"
+                        disabled
+                    >
+                        Eksport CSV
+                    </button>
+
+                    <button
+                        type="button"
+                        id="twbbsClear"
+                    >
+                        Wyczyść zapis
+                    </button>
+                </div>
+
+                <div class="twbbs-progress">
+                    <div id="twbbsProgressBar"></div>
+                </div>
+
+                <div id="twbbsStatus" class="twbbs-status">
+                    Panel został prawidłowo zadokowany.
+                </div>
+
+                <div id="twbbsSummary"></div>
+
+                <div id="twbbsResults" class="twbbs-results">
+                    <div class="twbbs-empty">
+                        Brak wyników.
+                    </div>
+                </div>
+            </div>
+        `;
+
+        if (target === document.body) {
+            panel.classList.add('twbbs-body-fallback');
+        }
+
+        target.insertBefore(
+            panel,
+            target.firstChild
+        );
+
+        document
+            .getElementById('twbbsStart')
+            .addEventListener(
+                'click',
+                startScan
+            );
+
+        document
+            .getElementById('twbbsStop')
+            .addEventListener(
+                'click',
+                stopScan
+            );
+
+        document
+            .getElementById('twbbsSaved')
+            .addEventListener(
+                'click',
+                showSavedResults
+            );
+
+        document
+            .getElementById('twbbsExport')
+            .addEventListener(
+                'click',
+                exportCsv
+            );
+
+        document
+            .getElementById('twbbsClear')
+            .addEventListener(
+                'click',
+                clearSavedResults
+            );
+
+        document
+            .getElementById('twbbsToggle')
+            .addEventListener(
+                'click',
+                togglePanel
+            );
+
+        console.log(
+            '[Skaner barbarzyńców] Panel zadokowany.',
+            {
+                screen,
+                target
+            }
+        );
+    }
+
+    async function startScan() {
+        if (scanning) {
+            return;
+        }
+
+        settings = readSettings();
+        saveSettings(settings);
+
+        if (
+            !settings.scanAF &&
+            !settings.scanReports
+        ) {
+            setStatus(
+                'Zaznacz pobieranie z AF albo ze stron raportów.',
+                true
+            );
+
+            return;
+        }
+
+        scanning = true;
+        stopRequested = false;
+        currentResults = [];
+
+        setButtonsForScan(true);
+        setProgress(0);
+        clearDisplayedResults();
+
+        try {
+            const reportMap = new Map();
+
+            if (settings.scanAF) {
+                await collectAllFarmAssistantPages(
+                    reportMap
+                );
+            }
+
+            if (
+                settings.scanReports &&
+                !stopRequested &&
+                reportMap.size < settings.maxReports
+            ) {
+                await collectAllReportPages(
+                    reportMap
+                );
+            }
+
+            if (stopRequested) {
+                throw new Error(
+                    'Skanowanie zostało zatrzymane.'
+                );
+            }
+
+            const reportLinks = Array
+                .from(reportMap.values())
+                .slice(
+                    0,
+                    settings.maxReports
+                );
+
+            if (!reportLinks.length) {
+                throw new Error(
+                    'Nie znaleziono żadnych linków do raportów.'
+                );
+            }
+
+            setStatus(
+                `Zebrano ${reportLinks.length} unikalnych raportów. Czytam ich zawartość…`
+            );
+
+            const parsed = await processReports(
+                reportLinks
+            );
+
+            if (stopRequested) {
+                throw new Error(
+                    'Skanowanie zostało zatrzymane.'
+                );
+            }
+
+            currentResults = prepareResults(parsed);
+
+            saveResults(currentResults);
+            renderResults(currentResults);
+            renderSummary(currentResults);
+
+            setProgress(100);
+
+            setStatus(
+                `Gotowe. Sprawdzono ${reportLinks.length} raportów. ` +
+                `Znaleziono ${currentResults.length} wiosek barbarzyńskich.`
+            );
+        } catch (error) {
+            console.error(
+                '[Skaner barbarzyńców]',
+                error
+            );
+
+            setStatus(
+                error?.message ||
+                'Wystąpił nieznany błąd.',
+                true
+            );
+        } finally {
+            scanning = false;
+            setButtonsForScan(false);
+        }
+    }
+
+    function stopScan() {
+        stopRequested = true;
+
+        setStatus(
+            'Zatrzymywanie skanowania…'
+        );
+    }
+
+    async function collectAllFarmAssistantPages(
+        reportMap
+    ) {
+        let page = 0;
+        let emptyPages = 0;
+
+        while (
+            !stopRequested &&
+            reportMap.size < settings.maxReports
+        ) {
+            setStatus(
+                `AF: pobieram stronę ${page + 1}. ` +
+                `Raporty: ${reportMap.size}/${settings.maxReports}.`
+            );
+
+            const url = createFarmAssistantUrl(page);
+            const html = await fetchHtml(url);
+            const doc = parseHtml(html);
+
+            const reportLinks =
+                extractReportLinks(doc);
+
+            let added = 0;
+
+            for (const report of reportLinks) {
+                if (
+                    reportMap.size >=
+                    settings.maxReports
+                ) {
+                    break;
+                }
+
+                if (!reportMap.has(report.id)) {
+                    reportMap.set(
+                        report.id,
+                        report
+                    );
+
+                    added++;
+                }
+            }
+
+            setCollectionProgress(
+                reportMap.size
+            );
+
+            if (
+                reportLinks.length === 0 ||
+                added === 0
+            ) {
+                emptyPages++;
+            } else {
+                emptyPages = 0;
+            }
+
+            const nextPage = findNextPage(
+                doc,
+                page
+            );
+
+            if (emptyPages >= 2) {
+                break;
+            }
+
+            if (nextPage === null) {
+                if (reportLinks.length === 0) {
+                    break;
+                }
+
+                page++;
+            } else {
+                page = nextPage;
+            }
+
+            await sleep(settings.delay);
+        }
+    }
+
+    async function collectAllReportPages(
+        reportMap
+    ) {
+        let page = 0;
+        let emptyPages = 0;
+
+        while (
+            !stopRequested &&
+            reportMap.size < settings.maxReports
+        ) {
+            setStatus(
+                `Raporty: pobieram stronę ${page + 1}. ` +
+                `Raporty: ${reportMap.size}/${settings.maxReports}.`
+            );
+
+            const url = createReportsUrl(page);
+            const html = await fetchHtml(url);
+            const doc = parseHtml(html);
+
+            const reportLinks =
+                extractReportLinks(doc);
+
+            let added = 0;
+
+            for (const report of reportLinks) {
+                if (
+                    reportMap.size >=
+                    settings.maxReports
+                ) {
+                    break;
+                }
+
+                if (!reportMap.has(report.id)) {
+                    reportMap.set(
+                        report.id,
+                        report
+                    );
+
+                    added++;
+                }
+            }
+
+            setCollectionProgress(
+                reportMap.size
+            );
+
+            if (
+                reportLinks.length === 0 ||
+                added === 0
+            ) {
+                emptyPages++;
+            } else {
+                emptyPages = 0;
+            }
+
+            if (emptyPages >= 2) {
+                break;
+            }
+
+            const nextPage = findNextPage(
+                doc,
+                page
+            );
+
+            if (nextPage === null) {
+                if (reportLinks.length === 0) {
+                    break;
+                }
+
+                page++;
+            } else {
+                page = nextPage;
+            }
+
+            await sleep(settings.delay);
+        }
+    }
+
+    function createFarmAssistantUrl(page) {
+        const url = new URL(
+            '/game.php',
+            location.origin
+        );
+
+        const villageId =
+            getCurrentVillageId();
+
+        if (villageId) {
+            url.searchParams.set(
+                'village',
+                villageId
+            );
+        }
+
+        url.searchParams.set(
+            'screen',
+            'am_farm'
+        );
+
+        url.searchParams.set(
+            'page',
+            String(page)
+        );
+
+        return url.href;
+    }
+
+    function createReportsUrl(page) {
+        const url = new URL(
+            '/game.php',
+            location.origin
+        );
+
+        const villageId =
+            getCurrentVillageId();
+
+        if (villageId) {
+            url.searchParams.set(
+                'village',
+                villageId
+            );
+        }
+
+        url.searchParams.set(
+            'screen',
+            'report'
+        );
+
+        url.searchParams.set(
+            'mode',
+            'all'
+        );
+
+        url.searchParams.set(
+            'page',
+            String(page)
+        );
+
+        return url.href;
+    }
+
+    function getCurrentVillageId() {
+        if (
+            typeof game_data !== 'undefined' &&
+            game_data?.village?.id
+        ) {
+            return String(
+                game_data.village.id
+            );
+        }
+
+        return (
+            new URLSearchParams(
+                location.search
+            ).get('village') ||
+            ''
+        );
+    }
+
+    function findNextPage(
+        doc,
+        currentPage
+    ) {
+        const pages = [];
+
+        const links = doc.querySelectorAll(
+            'a[href*="page="]'
+        );
+
+        for (const link of links) {
+            const href =
+                link.getAttribute('href');
+
+            if (!href) {
+                continue;
+            }
+
+            try {
+                const url = new URL(
+                    href,
+                    location.origin
+                );
+
+                const page = Number(
+                    url.searchParams.get('page')
+                );
+
+                if (
+                    Number.isInteger(page) &&
+                    page > currentPage
+                ) {
+                    pages.push(page);
+                }
+            } catch {
+                // Pominięcie nieprawidłowego odnośnika.
+            }
+        }
+
+        if (!pages.length) {
+            return null;
+        }
+
+        pages.sort(
+            (a, b) => a - b
+        );
+
+        return pages[0];
+    }
+
+    function extractReportLinks(doc) {
+        const reports = new Map();
+
+        const links = doc.querySelectorAll(
+            'a[href*="screen=report"][href*="view="], ' +
+            'a[href*="view="][href*="report"]'
+        );
+
+        for (const link of links) {
+            const href =
+                link.getAttribute('href');
+
+            if (!href) {
+                continue;
+            }
+
+            let url;
+
+            try {
+                url = new URL(
+                    href,
+                    location.origin
+                );
+            } catch {
+                continue;
+            }
+
+            const id =
+                url.searchParams.get('view');
+
+            if
